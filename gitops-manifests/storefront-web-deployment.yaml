@@ -1,0 +1,3 @@
+
+# [WATCHDOG AUTO-FIX 20260822-183921]
+# Correct the image registry URL in the deployment manifest

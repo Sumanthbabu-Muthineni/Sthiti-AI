@@ -1,0 +1,89 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: watchdog-system
+  labels:
+    app.kubernetes.io/name: k8s-agentic-watchdog
+    app.kubernetes.io/part-of: watchdog-system
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: watchdog-sa
+  namespace: watchdog-system
+  labels:
+    app.kubernetes.io/name: k8s-agentic-watchdog
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: watchdog-role
+  labels:
+    app.kubernetes.io/name: k8s-agentic-watchdog
+rules:
+  # 1. Least-Privilege Read-Only Diagnostic Access
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - pods/status
+      - events
+      - configmaps
+      - services
+      - nodes
+      - namespaces
+      - resourcequotas
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - statefulsets
+      - daemonsets
+      - replicasets
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: ["events.k8s.io"]
+    resources:
+      - events
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: ["metrics.k8s.io"]
+    resources:
+      - pods
+      - nodes
+    verbs: ["get", "list"]
+
+  # 2. Scoped Ephemeral Remediation Write Permissions
+  - apiGroups: [""]
+    resources:
+      - pods
+    verbs: ["delete"] # Ephemeral restart for crashed/deadlocked pods
+
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+    verbs: ["patch", "get", "update"] # For rollout restarts and resource limit updates
+
+  - apiGroups: [""]
+    resources:
+      - nodes
+    verbs: ["patch"] # For node cordoning during hardware/disk failure
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: watchdog-rolebinding
+  labels:
+    app.kubernetes.io/name: k8s-agentic-watchdog
+subjects:
+  - kind: ServiceAccount
+    name: watchdog-sa
+    namespace: watchdog-system
+roleRef:
+  kind: ClusterRole
+  name: watchdog-role
+  apiGroup: rbac.authorization.k8s.io

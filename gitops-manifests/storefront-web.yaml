@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storefront-web
+  namespace: watchdog-demo
+  labels:
+    app: storefront-web
+    tier: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: storefront-web
+  template:
+    metadata:
+      labels:
+        app: storefront-web
+    spec:
+      containers:
+      - name: storefront-web
+        image: nginx:alpine
+        resources:
+          limits:
+            memory: "256Mi"
+            cpu: "100m"
+        ports:
+        - containerPort: 80
+
+# [WATCHDOG AUTO-FIX 20260822-181156]
+# Rollback storefront-web image tag to stable 'v2.9.4'

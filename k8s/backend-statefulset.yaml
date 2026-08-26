@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: watchdog-backend
+  namespace: watchdog-system
+  labels:
+    app.kubernetes.io/name: watchdog-backend
+    app.kubernetes.io/component: api-agent
+    app.kubernetes.io/part-of: watchdog-system
+spec:
+  serviceName: watchdog-backend
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: watchdog-backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: watchdog-backend
+    spec:
+      serviceAccountName: watchdog-sa
+      containers:
+        - name: watchdog-backend
+          image: ghcr.io/k8s-agentic-watchdog/backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "8000"
+            - name: DB_PATH
+              value: "/data/watchdog_state.db"
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: watchdog-secrets
+                  key: OPENAI_API_KEY
+                  optional: true
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: watchdog-secrets
+                  key: GITHUB_TOKEN
+                  optional: true
+            - name: GITHUB_REPO
+              valueFrom:
+                secretKeyRef:
+                  name: watchdog-secrets
+                  key: GITHUB_REPO
+                  optional: true
+          volumeMounts:
+            - name: watchdog-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+  volumeClaimTemplates:
+    - metadata:
+        name: watchdog-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
