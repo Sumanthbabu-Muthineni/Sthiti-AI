@@ -11,7 +11,8 @@ import {
   Server,
   X,
   Cpu,
-  HardDrive
+  HardDrive,
+  Boxes
 } from 'lucide-react';
 import type { ClusterInfo } from '../types';
 
@@ -21,9 +22,9 @@ interface HeaderProps {
   remediatedCount: number;
   totalAlerts: number;
   scrubbedCount: number;
-  activeView: 'dashboard' | 'history';
+  activeView: 'dashboard' | 'inframap' | 'history';
   clusterInfo: ClusterInfo | null;
-  onViewChange: (view: 'dashboard' | 'history') => void;
+  onViewChange: (view: 'dashboard' | 'inframap' | 'history') => void;
   onOpenSimulate: () => void;
 }
 
@@ -165,7 +166,19 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
 
             <button
-              onClick={() => onViewChange(activeView === 'dashboard' ? 'history' : 'dashboard')}
+              onClick={() => onViewChange(activeView === 'inframap' ? 'dashboard' : 'inframap')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all cursor-pointer ${
+                activeView === 'inframap'
+                  ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/60 shadow-sm shadow-cyan-950/40'
+                  : 'bg-slate-900 text-slate-300 border-slate-700/80 hover:bg-slate-800'
+              }`}
+            >
+              <Boxes className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Infra Map</span>
+            </button>
+
+            <button
+              onClick={() => onViewChange(activeView === 'history' ? 'dashboard' : 'history')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all cursor-pointer ${
                 activeView === 'history'
                   ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/50 shadow-sm'

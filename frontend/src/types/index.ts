@@ -2,12 +2,82 @@ export type SeverityLevel = 'Critical' | 'Warning' | 'Info';
 export type IncidentStatus = 'analyzing' | 'awaiting_approval' | 'remediated' | 'rejected' | 'failed' | 'investigating';
 export type ActionType = 'imperative' | 'gitops';
 
+export type EventCategory = 'Deploy/Scale' | 'Image' | 'Crash/Error' | 'Health';
+
+export interface FoldedEvent {
+  event_uid: string;
+  logical_key?: string;
+  reason: string;
+  category: EventCategory;
+  severity: SeverityLevel;
+  message: string;
+  count: number;
+  delta_count?: number;
+  accumulated_count?: number;
+  multiplier_str: string;
+  container_name?: string;
+  involved_kind?: string;
+  involved_name?: string;
+  involved_uid?: string;
+  first_timestamp?: string;
+  last_timestamp?: string;
+}
+
+export interface TopologyContainerStatus {
+  name: string;
+  ready: boolean;
+  restarts: number;
+  state: string;
+}
+
+export interface TopologyNode {
+  id: string;
+  uid: string;
+  name: string;
+  kind: string;
+  namespace: string;
+  status: string;
+  worst_state: 'Critical' | 'Warning' | 'Healthy';
+  has_unhealthy_children?: boolean;
+  is_root?: boolean;
+  events: FoldedEvent[];
+  containers?: TopologyContainerStatus[];
+  metadata?: Record<string, any>;
+}
+
+export interface TopologyEdge {
+  id: string;
+  source: string;
+  target: string;
+  relation: string;
+}
+
+export interface NeighborhoodResponse {
+  root_id: string;
+  cluster: string;
+  namespace: string;
+  timestamp: string;
+  is_historical: boolean;
+  worst_state: 'Critical' | 'Warning' | 'Healthy';
+  nodes: TopologyNode[];
+  edges: TopologyEdge[];
+}
+
+export interface TopologySnapshot {
+  timestamp: string;
+  cluster: string;
+  namespace: string;
+}
+
 export interface AlertEvent {
   event_id: string;
   cluster: string;
   namespace: string;
   resource_kind: string;
   resource_name: string;
+  resource_uid?: string;
+  root_workload_uid?: string;
+  container_name?: string;
   severity: SeverityLevel;
   reason: string;
   reasons?: string[];

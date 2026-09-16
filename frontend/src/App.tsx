@@ -5,17 +5,23 @@ import { ApprovalCenter } from './components/ApprovalCenter';
 import { LiveTerminal } from './components/LiveTerminal';
 import { AuditHistory } from './components/AuditHistory';
 import { SimulateModal } from './components/SimulateModal';
+import { InfraMap } from './components/InfraMap';
 import { useSSE } from './hooks/useSSE';
 import { api } from './services/api';
 import type { PendingApproval, EventRecord, AuditRecord, SSEMessage, ClusterInfo } from './types';
 
 export function App() {
-  const [activeView, setActiveView] = useState<'dashboard' | 'history'>('dashboard');
+  const [activeView, setActiveView] = useState<'dashboard' | 'inframap' | 'history'>('dashboard');
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditRecord[]>([]);
   const [clusterInfo, setClusterInfo] = useState<ClusterInfo | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+  const [infraMapTarget, setInfraMapTarget] = useState<{ namespace: string; kind: string; name: string }>({
+    namespace: 'watchdog-demo',
+    kind: 'Deployment',
+    name: 'payment-processor',
+  });
   const [isSimulateOpen, setIsSimulateOpen] = useState<boolean>(false);
   const [isProcessingApproval, setIsProcessingApproval] = useState<boolean>(false);
   const [scrubbedTokenCount, setScrubbedTokenCount] = useState<number>(14);
@@ -86,6 +92,11 @@ export function App() {
     }
   };
 
+  const handleOpenInfraMap = (target: { namespace: string; kind: string; name: string }) => {
+    setInfraMapTarget(target);
+    setActiveView('inframap');
+  };
+
   const remediatedCount = auditLogs.filter((a) => a.human_approved === true).length;
   const totalAlertsCount = events.reduce(
     (sum, e) => sum + (e.alert_count || e.event?.alert_count || 1),
@@ -114,6 +125,15 @@ export function App() {
           auditLogs={auditLogs}
           onClose={() => setActiveView('dashboard')}
         />
+      ) : activeView === 'inframap' ? (
+        <div className="flex-1 h-[calc(100vh-65px)] overflow-hidden">
+          <InfraMap
+            initialNamespace={infraMapTarget.namespace}
+            initialKind={infraMapTarget.kind}
+            initialName={infraMapTarget.name}
+            onClose={() => setActiveView('dashboard')}
+          />
+        </div>
       ) : (
         <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
           
@@ -122,6 +142,7 @@ export function App() {
             events={events}
             selectedThreadId={selectedThreadId}
             onSelectEvent={(threadId) => setSelectedThreadId(threadId)}
+            onOpenInfraMap={handleOpenInfraMap}
             onTriggerSimulate={() => setIsSimulateOpen(true)}
           />
 
@@ -133,6 +154,7 @@ export function App() {
               pendingApprovals={pendingApprovals}
               selectedThreadId={selectedThreadId}
               onApprove={handleApprove}
+              onOpenInfraMap={handleOpenInfraMap}
               isProcessing={isProcessingApproval}
             />
 

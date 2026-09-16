@@ -56,5 +56,38 @@ export const api = {
     const res = await fetch(`${API_BASE}/cluster/status`);
     if (!res.ok) throw new Error('Failed to fetch cluster status');
     return res.json();
+  },
+
+  async getTopologyNeighborhood(
+    namespace: string = 'watchdog-demo',
+    kind: string = 'Deployment',
+    name: string = 'payment-processor',
+    timestamp?: string
+  ): Promise<any> {
+    const params = new URLSearchParams({
+      namespace,
+      resource_kind: kind,
+      resource_name: name,
+    });
+    if (timestamp) params.append('timestamp', timestamp);
+    const res = await fetch(`${API_BASE}/topology/neighborhood?${params.toString()}`);
+    if (!res.ok) throw new Error('Failed to fetch topology neighborhood');
+    return res.json();
+  },
+
+  async getTopologySnapshots(): Promise<any[]> {
+    const res = await fetch(`${API_BASE}/topology/snapshots`);
+    if (!res.ok) throw new Error('Failed to fetch topology snapshots');
+    const data = await res.json();
+    return data.snapshots || [];
+  },
+
+  async getTopologyEvents(namespace: string = 'watchdog-demo', workload: string = ''): Promise<any[]> {
+    const params = new URLSearchParams({ namespace });
+    if (workload) params.append('workload', workload);
+    const res = await fetch(`${API_BASE}/topology/events?${params.toString()}`);
+    if (!res.ok) throw new Error('Failed to fetch topology events');
+    const data = await res.json();
+    return data.events || [];
   }
 };

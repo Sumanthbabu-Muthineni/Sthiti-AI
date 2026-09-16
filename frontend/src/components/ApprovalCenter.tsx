@@ -9,18 +9,21 @@ import {
   Loader2, 
   Sparkles, 
   Eye, 
-  Layers,
-  Zap,
-  Flame,
-  Activity
+  Layers, 
+  Zap, 
+  Flame, 
+  Activity,
+  Boxes
 } from 'lucide-react';
 import type { PendingApproval } from '../types';
 import { DiffViewer } from './DiffViewer';
+import { InfraMap } from './InfraMap';
 
 interface ApprovalCenterProps {
   pendingApprovals: PendingApproval[];
   selectedThreadId: string | null;
   onApprove: (threadId: string, approved: boolean, comment?: string) => Promise<void>;
+  onOpenInfraMap?: (target: { namespace: string; kind: string; name: string }) => void;
   isProcessing: boolean;
 }
 
@@ -28,10 +31,12 @@ export const ApprovalCenter: React.FC<ApprovalCenterProps> = ({
   pendingApprovals,
   selectedThreadId,
   onApprove,
+  onOpenInfraMap,
   isProcessing,
 }) => {
   const [comment, setComment] = useState<string>('');
   const [showLogs, setShowLogs] = useState<boolean>(false);
+  const [showInlineMap, setShowInlineMap] = useState<boolean>(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
   // Find active pending approval
@@ -143,17 +148,94 @@ export const ApprovalCenter: React.FC<ApprovalCenterProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center space-x-3 bg-slate-900/90 border border-slate-800 px-3.5 py-2 rounded-lg">
-            <div className="text-right">
-              <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">AI Confidence</div>
-              <div className="text-sm font-bold text-cyan-400 font-mono">{confidencePercent}%</div>
-            </div>
-            <div className="w-8 h-8 rounded-full border-2 border-cyan-500/40 flex items-center justify-center text-cyan-400">
-              <Sparkles className="w-4 h-4" />
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Full Infra Map Button */}
+            <button
+              onClick={() => {
+                if (onOpenInfraMap) {
+                  onOpenInfraMap({
+                    namespace: event.namespace || 'watchdog-demo',
+                    kind: event.resource_kind || 'Deployment',
+                    name: deploymentName
+                  });
+                } else {
+                  setShowInlineMap(true);
+                }
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-950/90 hover:bg-indigo-900 text-cyan-300 border border-indigo-700/60 hover:border-cyan-500/60 transition-all text-xs font-mono font-semibold cursor-pointer shadow-sm"
+              title="Open Full Screen Infra Map"
+            >
+              <Boxes className="w-3.5 h-3.5 text-cyan-400" />
+              <span>⚡ Full Infra Map</span>
+            </button>
+
+            {/* Toggle Inline Preview */}
+            <button
+              onClick={() => setShowInlineMap(!showInlineMap)}
+              className={`flex items-center gap-1 px-3 py-1.5 rounded-lg border text-xs font-mono transition-all cursor-pointer ${
+                showInlineMap 
+                  ? 'bg-cyan-950 text-cyan-300 border-cyan-600' 
+                  : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
+              }`}
+              title="Toggle Inline Topology Preview"
+            >
+              <span>{showInlineMap ? 'Hide Preview' : '🗺️ Preview Topology'}</span>
+            </button>
+
+            <div className="flex items-center space-x-2 bg-slate-900/90 border border-slate-800 px-3 py-1.5 rounded-lg">
+              <div className="text-right">
+                <div className="text-[9px] text-slate-400 uppercase tracking-wider font-semibold">Confidence</div>
+                <div className="text-xs font-bold text-cyan-400 font-mono">{confidencePercent}%</div>
+              </div>
+              <div className="w-6 h-6 rounded-full border border-cyan-500/40 flex items-center justify-center text-cyan-400">
+                <Sparkles className="w-3 h-3" />
+              </div>
             </div>
           </div>
         </div>
       </div>
+
+      {/* Inline Kubernetes Neighborhood Map Preview */}
+      {showInlineMap && (
+        <div className="rounded-xl overflow-hidden border border-cyan-500/40 bg-[#070a12] shadow-2xl animate-in fade-in">
+          <div className="px-4 py-2 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between text-xs font-mono">
+            <div className="flex items-center gap-2 text-slate-200">
+              <Boxes className="w-4 h-4 text-cyan-400" />
+              <span>Kubernetes Neighborhood Topology: <strong className="text-cyan-300">{deploymentName}</strong></span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  if (onOpenInfraMap) {
+                    onOpenInfraMap({
+                      namespace: event.namespace || 'watchdog-demo',
+                      kind: event.resource_kind || 'Deployment',
+                      name: deploymentName
+                    });
+                  }
+                }}
+                className="text-[11px] text-cyan-400 hover:underline px-2.5 py-0.5 rounded bg-cyan-950/60 border border-cyan-800/60 cursor-pointer"
+              >
+                Open Full Screen ↗
+              </button>
+              <button
+                onClick={() => setShowInlineMap(false)}
+                className="text-slate-400 hover:text-white px-1.5 py-0.5 rounded hover:bg-slate-800 cursor-pointer"
+                title="Close Preview"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+          <InfraMap
+            initialNamespace={event.namespace || 'watchdog-demo'}
+            initialKind={event.resource_kind || 'Deployment'}
+            initialName={deploymentName}
+            isEmbedded={true}
+            onClose={() => setShowInlineMap(false)}
+          />
+        </div>
+      )}
 
       {/* Grid: Root Cause Analysis & Proposed Fix */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">

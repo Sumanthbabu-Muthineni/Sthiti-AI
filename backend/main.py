@@ -14,9 +14,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
-from models import AlertEvent, ApprovalRequest, RCAAnalysisAndProposal, AuditRecord
+from models import AlertEvent, ApprovalRequest, RCAAnalysisAndProposal, AuditRecord, NeighborhoodResponse, FoldedEvent
 from agent import watchdog_app
 from tools import investigator
+from topology import neighborhood_resolver, snapshot_engine, get_db_path
+from events_folding import events_folder
 from langgraph.types import Command
 
 # Configure logging
@@ -31,12 +33,31 @@ SHUTDOWN_EVENT = asyncio.Event()
 ACTIVE_K8S_WATCH: Any = None
 CLUSTER_INFO_CACHE: Dict[str, Any] = {"data": None, "ts": 0}
 
+async def periodic_topology_snapshot_worker():
+    """Captures periodic topology snapshots for historical time-travel debugging (OTel k8s_objects pattern)."""
+    logger.info("Initializing Periodic Topology Snapshot Worker...")
+    await asyncio.to_thread(snapshot_engine.capture_snapshot)
+    while not SHUTDOWN_EVENT.is_set():
+        try:
+            for _ in range(300):  # 5 minutes interval
+                if SHUTDOWN_EVENT.is_set():
+                    break
+                await asyncio.sleep(1)
+            if not SHUTDOWN_EVENT.is_set():
+                await asyncio.to_thread(snapshot_engine.capture_snapshot)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.debug(f"Topology snapshot worker notice: {e}")
+            await asyncio.sleep(10)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Asynchronous lifespan manager: starts background workers & ensures instant <0.2s shutdown on Ctrl+C."""
     SHUTDOWN_EVENT.clear()
     watcher_task = asyncio.create_task(live_kubernetes_event_watcher())
     pr_task = asyncio.create_task(live_pr_and_health_reconciliation_worker())
+    snapshot_task = asyncio.create_task(periodic_topology_snapshot_worker())
     logger.info("⚡ High-performance asynchronous background workers started.")
     try:
         yield
@@ -51,7 +72,8 @@ async def lifespan(app: FastAPI):
                 pass
         watcher_task.cancel()
         pr_task.cancel()
-        await asyncio.gather(watcher_task, pr_task, return_exceptions=True)
+        snapshot_task.cancel()
+        await asyncio.gather(watcher_task, pr_task, snapshot_task, return_exceptions=True)
         logger.info("✅ Watchdog backend shutdown complete in < 0.2s.")
 
 
@@ -85,50 +107,38 @@ PROCESSED_MERGED_PRS: set = set()
 SERVER_START_TIME: float = time.time()
 
 
-def extract_deployment_name(resource_name: str, resource_kind: str = "Pod") -> str:
+def extract_deployment_name(resource_name: str, resource_kind: str = "Pod", namespace: str = "default") -> str:
     """
-    Normalizes resource name to the root deployment/workload name.
-    e.g. 'storefront-web-646d9f8-xyz12' -> 'storefront-web'
-         'payment-processor-7f89d' -> 'payment-processor'
-         'auth-gateway-xyz' -> 'auth-gateway'
-         'billing-processor-abc' -> 'billing-processor'
-         'cartservice-xyz' -> 'cartservice'
-         'worker-node-pool-2b' -> 'worker-node-pool-2b'
+    Normalizes resource name to the root deployment/workload name using native
+    ownerReferences traversal when available, with deterministic fallback.
     """
     if not resource_name:
         return "unknown"
-    
-    # Check known keywords first
-    for known in ["storefront-web", "payment-processor", "auth-gateway", "billing-processor", "cartservice"]:
-        if known in resource_name:
-            return known
-            
-    # Strip standard K8s ReplicaSet & Pod hash suffix (e.g. -5d78b74684-x9kz2 or -7f89d)
-    cleaned = re.sub(r'-[a-z0-9]{4,10}(-[a-z0-9]{4,10})?$', '', resource_name)
-    if cleaned:
-        return cleaned
-        
-    return resource_name.split("-")[0] if "-" in resource_name else resource_name
+    root_info = neighborhood_resolver.resolve_root_workload(namespace, resource_kind, resource_name)
+    return root_info.get("root_name") or resource_name
 
 
-def find_active_incident_for_workload(namespace: str, resource_name: str, resource_kind: str = "Pod") -> Optional[str]:
+def find_active_incident_for_workload(namespace: str, resource_name: str, resource_kind: str = "Pod", resource_uid: Optional[str] = None) -> Optional[str]:
     """
-    Finds existing active incident (thread_id) matching namespace and deployment/workload.
-    Active statuses: 'analyzing', 'investigating', 'awaiting_approval'.
+    Finds existing active incident (thread_id) matching namespace and root workload identity.
+    Uses native ownerReferences UID resolution to avoid regex heuristics.
     """
-    target_dep = extract_deployment_name(resource_name, resource_kind)
+    root_info = neighborhood_resolver.resolve_root_workload(namespace, resource_kind, resource_name, resource_uid)
+    target_root_name = root_info.get("root_name") or resource_name
+    target_root_uid = root_info.get("root_uid")
+
     for thread_id, record in EVENT_STORE.items():
         if record.get("status") in ["awaiting_approval", "analyzing", "investigating"]:
             rec_event = record.get("event", {})
             rec_ns = rec_event.get("namespace", "")
-            rec_res = rec_event.get("resource_name", "")
-            rec_dep = record.get("deployment_name") or extract_deployment_name(rec_res, rec_event.get("resource_kind", "Pod"))
+            rec_root_name = record.get("root_workload_name") or record.get("deployment_name")
+            rec_root_uid = record.get("root_workload_uid")
             
-            # Match if same namespace (or if one is empty/wildcard) AND matching deployment/workload
             ns_match = (rec_ns == namespace) or (not namespace) or (not rec_ns)
-            dep_match = (rec_dep == target_dep) or (target_dep in rec_res) or (rec_dep in resource_name)
+            uid_match = bool(target_root_uid and rec_root_uid and (target_root_uid == rec_root_uid))
+            name_match = (rec_root_name == target_root_name) or (target_root_name in str(rec_event.get("resource_name", ""))) or (rec_root_name and rec_root_name in resource_name)
             
-            if ns_match and dep_match:
+            if ns_match and (uid_match or name_match):
                 return thread_id
     return None
 
@@ -136,12 +146,19 @@ def find_active_incident_for_workload(namespace: str, resource_name: str, resour
 async def ingest_or_aggregate_alert(alert_event: AlertEvent, background_tasks: Optional[BackgroundTasks] = None) -> Dict[str, Any]:
     """
     Core alert ingestion pipeline:
-    - If an active incident exists for this deployment, merges the alert into it, increments alert_count,
+    - Resolves root workload identity using native ownerReferences traversal (Pod -> RS -> Deployment).
+    - If an active incident exists for this workload, merges the alert into it, increments alert_count,
       and appends new reason to reasons list.
     - If no active incident exists, initializes a single new incident and starts LangGraph workflow.
     """
-    dep_name = extract_deployment_name(alert_event.resource_name, alert_event.resource_kind)
-    existing_thread_id = find_active_incident_for_workload(alert_event.namespace, alert_event.resource_name, alert_event.resource_kind)
+    root_info = neighborhood_resolver.resolve_root_workload(
+        alert_event.namespace, alert_event.resource_kind, alert_event.resource_name, alert_event.resource_uid
+    )
+    dep_name = root_info.get("root_name") or alert_event.resource_name
+    root_uid = root_info.get("root_uid")
+    existing_thread_id = find_active_incident_for_workload(
+        alert_event.namespace, alert_event.resource_name, alert_event.resource_kind, alert_event.resource_uid
+    )
 
     if existing_thread_id:
         record = EVENT_STORE[existing_thread_id]
@@ -202,6 +219,8 @@ async def ingest_or_aggregate_alert(alert_event: AlertEvent, background_tasks: O
             "event_id": alert_event.event_id,
             "thread_id": thread_id,
             "deployment_name": dep_name,
+            "root_workload_name": dep_name,
+            "root_workload_uid": root_uid,
             "alert_count": 1,
             "reasons": reasons_list,
             "event": alert_dict,
@@ -279,15 +298,28 @@ async def live_kubernetes_event_watcher():
                     res_kind = getattr(involved_obj, "kind", "Pod") if involved_obj else "Pod"
                     message = getattr(event_obj, "message", "") or ""
                     event_count = getattr(event_obj, "count", 1) or 1
-                    raw_ts = getattr(event_obj, "last_timestamp", None) or getattr(metadata, "creation_timestamp", "") or ""
-                    event_uid = f"{getattr(metadata, 'uid', 'k8s')}_{event_count}_{raw_ts}"
 
-                    # 1. Filter out already processed Kubernetes event instances
-                    if event_uid in PROCESSED_K8S_EVENT_UIDS:
-                        continue
-                    PROCESSED_K8S_EVENT_UIDS.add(event_uid)
-                    if len(PROCESSED_K8S_EVENT_UIDS) > 10000:
-                        PROCESSED_K8S_EVENT_UIDS.clear()
+                    k8s_uid = getattr(metadata, 'uid', None) or f"evt-{res_name}-{reason}"
+                    inv_uid = getattr(involved_obj, 'uid', None) or ""
+                    field_path = getattr(involved_obj, 'field_path', '') or ""
+
+                    # 1. Process event through native UID delta folder
+                    folded_evt = events_folder.process_event({
+                        "metadata": {"uid": k8s_uid, "namespace": ns},
+                        "count": event_count,
+                        "reason": reason,
+                        "message": message,
+                        "type": event_type,
+                        "involved_object": {
+                            "kind": res_kind,
+                            "name": res_name,
+                            "uid": inv_uid,
+                            "field_path": field_path
+                        }
+                    })
+
+                    # Persist folded event to SQLite
+                    snapshot_engine.record_folded_event(folded_evt, cluster="minikube")
 
                     # 2. Filter for real chaos warning events
                     CHAOS_REASONS = [
@@ -302,7 +334,17 @@ async def live_kubernetes_event_watcher():
                     if ns in ["kube-system", "kube-node-lease", "kube-public"] or not is_chaos:
                         continue
 
-                    dep_prefix = extract_deployment_name(res_name, res_kind)
+                    # Trigger on-demand micro-snapshot to eliminate ephemeral pod deletion race condition
+                    snapshot_engine.capture_snapshot({
+                        "cluster": "minikube",
+                        "namespace": ns,
+                        "kind": res_kind,
+                        "name": res_name,
+                        "uid": inv_uid
+                    })
+
+                    root_info = neighborhood_resolver.resolve_root_workload(ns, res_kind, res_name, inv_uid)
+                    dep_prefix = root_info.get("root_name") or res_name
 
                     # 3. Check event age to avoid replaying stale historical events on watch reconnect
                     now_ts = time.time()
@@ -319,8 +361,8 @@ async def live_kubernetes_event_watcher():
                         except Exception:
                             pass
 
-                    # Check if there is an active incident for this deployment
-                    active_thread_id = find_active_incident_for_workload(ns, res_name, res_kind)
+                    # Check if there is an active incident for this workload
+                    active_thread_id = find_active_incident_for_workload(ns, res_name, res_kind, inv_uid)
 
                     # Debounce rapid duplicate event bursts within 5 seconds if not active
                     if not active_thread_id:
@@ -328,7 +370,7 @@ async def live_kubernetes_event_watcher():
                             continue
                         SEEN_K8S_EVENTS[dep_prefix] = now_ts
 
-                    logger.info(f"🚨 [REAL_K8S_CHAOS_DETECTED] Namespace={ns}, Resource={res_name}, Reason={reason}")
+                    logger.info(f"🚨 [REAL_K8S_CHAOS_DETECTED] Namespace={ns}, Resource={res_name}, Reason={reason}, Multiplier={folded_evt.get('multiplier_str')}")
 
                     # Create live AlertEvent from actual cluster anomaly
                     event_id = f"k8s-live-{uuid.uuid4().hex[:6]}"
@@ -338,10 +380,13 @@ async def live_kubernetes_event_watcher():
                         namespace=ns,
                         resource_kind=res_kind,
                         resource_name=res_name,
+                        resource_uid=inv_uid,
+                        root_workload_uid=root_info.get("root_uid"),
+                        container_name=folded_evt.get("container_name"),
                         severity="Critical" if any(k in reason for k in ["OOM", "BackOff", "Failed", "ErrImage"]) else "Warning",
                         reason=reason or "ClusterAnomaly",
                         message=message or f"Kubernetes warning condition detected on {res_name}",
-                        raw_metadata={"live_k8s": True, "event_type": event_type}
+                        raw_metadata={"live_k8s": True, "event_type": event_type, "folded_event": folded_evt}
                     )
 
                     await ingest_or_aggregate_alert(alert_event, None)
@@ -516,6 +561,87 @@ async def get_cluster_pods(namespace: str = "watchdog-demo"):
         return {"namespace": namespace, "pods": [], "count": 0}
 
     return await asyncio.to_thread(_fetch_pods)
+
+
+@app.get("/api/v1/topology/neighborhood")
+async def get_topology_neighborhood(
+    namespace: str = "watchdog-demo",
+    resource_kind: str = "Deployment",
+    resource_name: str = "payment-processor",
+    timestamp: Optional[str] = None
+):
+    """
+    Returns the complete interactive Kubernetes Neighborhood graph:
+    Deployment -> ReplicaSet(s) -> Pod(s) with connected Nodes, Services, ConfigMaps, and PVCs.
+    Computes worst-state health inheritance and attaches delta-folded events with multipliers.
+    Supports historical timestamp queries for post-mortem time-travel debugging!
+    """
+    return await asyncio.to_thread(
+        neighborhood_resolver.build_neighborhood,
+        namespace=namespace,
+        resource_kind=resource_kind,
+        resource_name=resource_name,
+        timestamp=timestamp
+    )
+
+
+@app.get("/api/v1/topology/snapshots")
+async def list_topology_snapshots():
+    """Lists available historical snapshot timestamps for time-travel debugging."""
+    def _fetch_snapshots():
+        db_path = get_db_path()
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db_path, timeout=5.0)
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT snapshot_time, cluster, namespace FROM k8s_topology_snapshots ORDER BY id DESC LIMIT 20")
+            rows = cursor.fetchall()
+            conn.close()
+            return [{"timestamp": r[0], "cluster": r[1], "namespace": r[2]} for r in rows]
+        except Exception as e:
+            logger.debug(f"Snapshot list notice: {e}")
+            return []
+    return {"snapshots": await asyncio.to_thread(_fetch_snapshots)}
+
+
+@app.get("/api/v1/topology/events")
+async def list_topology_events(namespace: str = "watchdog-demo", workload: str = ""):
+    """Returns categorized, delta-folded events for objects matching namespace and workload."""
+    def _fetch_events():
+        db_path = get_db_path()
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db_path, timeout=5.0)
+            cursor = conn.cursor()
+            query = "SELECT event_uid, involved_kind, involved_name, reason, category, severity, message, accumulated_count, multiplier_str, last_timestamp FROM k8s_events_store WHERE namespace = ?"
+            params = [namespace]
+            if workload:
+                query += " AND (involved_name LIKE ? OR involved_name = ?)"
+                params.extend([f"%{workload}%", workload])
+            query += " ORDER BY id DESC LIMIT 50"
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            conn.close()
+            return [
+                {
+                    "event_uid": r[0],
+                    "involved_kind": r[1],
+                    "involved_name": r[2],
+                    "reason": r[3],
+                    "category": r[4],
+                    "severity": r[5],
+                    "message": r[6],
+                    "count": r[7],
+                    "multiplier_str": r[8] or (f"×{r[7]}" if r[7] > 1 else ""),
+                    "timestamp": r[9]
+                }
+                for r in rows
+            ]
+        except Exception as e:
+            logger.debug(f"Events list notice: {e}")
+            return []
+    return {"events": await asyncio.to_thread(_fetch_events)}
+
 
 
 @app.post("/api/v1/webhook/event")

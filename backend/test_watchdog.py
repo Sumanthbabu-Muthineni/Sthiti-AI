@@ -338,4 +338,167 @@ async def test_pre_execution_revalidation_node_detects_external_resolution():
         assert exec_res["status"] in ["remediated", "already_resolved"]
 
 
+def test_event_counter_delta_folding_native_uid():
+    """
+    Verifies the OpenTelemetry event folding pattern:
+    - Repeated updates to an existing Event object (38696 -> 38699 -> 38701)
+      must fold into delta +5 occurrences (not 38,701 or 3).
+    - Detects Kubelet counter reset (e.g. 38701 -> 2) gracefully.
+    """
+    from events_folding import EventDeltaFolder
+
+    folder = EventDeltaFolder()
+    event_uid = "k8s-evt-test-999"
+
+    # Step 1: First observation (count = 38696)
+    e1 = folder.process_event({
+        "metadata": {"uid": event_uid, "namespace": "payments"},
+        "count": 38696,
+        "reason": "FailedDraining",
+        "message": "Volume attachment timeout",
+        "type": "Warning",
+        "involved_object": {"kind": "Pod", "name": "payment-processor-abc", "uid": "pod-uid-1"}
+    })
+    assert e1["count"] == 38696
+    assert e1["accumulated_count"] == 38696
+
+    # Step 2: Second observation (count incremented to 38699, +3 occurrences)
+    e2 = folder.process_event({
+        "metadata": {"uid": event_uid, "namespace": "payments"},
+        "count": 38699,
+        "reason": "FailedDraining",
+        "message": "Volume attachment timeout",
+        "type": "Warning",
+        "involved_object": {"kind": "Pod", "name": "payment-processor-abc", "uid": "pod-uid-1"}
+    })
+    assert e2["delta_count"] == 3
+    assert e2["accumulated_count"] == 38699
+
+    # Step 3: Third observation (count incremented to 38701, +2 occurrences)
+    e3 = folder.process_event({
+        "metadata": {"uid": event_uid, "namespace": "payments"},
+        "count": 38701,
+        "reason": "FailedDraining",
+        "message": "Volume attachment timeout",
+        "type": "Warning",
+        "involved_object": {"kind": "Pod", "name": "payment-processor-abc", "uid": "pod-uid-1"}
+    })
+    assert e3["delta_count"] == 2
+    # Combined delta between step 1 and step 3 is 5 occurrences
+    delta_between_1_and_3 = (e2["delta_count"] + e3["delta_count"])
+    assert delta_between_1_and_3 == 5
+    assert e3["multiplier_str"] == "×38701"
+
+    # Step 4: Kubelet reboot / counter reset (count drops from 38701 to 2)
+    e4 = folder.process_event({
+        "metadata": {"uid": event_uid, "namespace": "payments"},
+        "count": 2,
+        "reason": "FailedDraining",
+        "message": "Volume attachment timeout",
+        "type": "Warning",
+        "involved_object": {"kind": "Pod", "name": "payment-processor-abc", "uid": "pod-uid-1"}
+    })
+    assert e4["delta_count"] == 2
+    assert e4["accumulated_count"] == (38701 + 2)
+
+
+def test_event_categorization():
+    """Verifies that Kubernetes event reasons cleanly map to the 4 debugging categories."""
+    from events_folding import categorize_event
+
+    # 1. Deploy / Scale
+    cat1, sev1 = categorize_event("ScalingReplicaSet", "Scaled up replica set", "Normal")
+    assert cat1 == "Deploy/Scale"
+    assert sev1 == "Info"
+
+    cat_kill, sev_kill = categorize_event("Killing", "Stopping container payment-processor", "Normal")
+    assert cat_kill == "Deploy/Scale"
+    assert sev_kill == "Info"
+
+    # 2. Image
+    cat2, sev2 = categorize_event("ImagePullBackOff", "Back-off pulling image", "Warning")
+    assert cat2 == "Image"
+    assert sev2 == "Critical"
+
+    # 3. Crash / Error
+    cat3, sev3 = categorize_event("OOMKilled", "Process killed with SIGKILL (exit code 137)", "Warning")
+    assert cat3 == "Crash/Error"
+    assert sev3 == "Critical"
+
+    # 4. Health
+    cat4, sev4 = categorize_event("NodeDiskPressure", "Available disk space below 10%", "Warning")
+    assert cat4 == "Health"
+    assert sev4 == "Critical"
+
+
+def test_owner_reference_uid_chain_resolution():
+    """Verifies that native ownerReferences traversal resolves root workloads without regexes."""
+    from topology import neighborhood_resolver, snapshot_engine
+
+    # Record a snapshot with Pod -> ReplicaSet -> Deployment
+    dep_uid = "uid-dep-orders-v1"
+    rs_uid = "uid-rs-orders-v1-99ab"
+    pod_uid = "uid-pod-orders-v1-99ab-x7"
+
+    snapshot_engine.capture_snapshot({
+        "namespace": "orders",
+        "kind": "Deployment",
+        "name": "orders-api",
+        "uid": dep_uid,
+        "owner_references": []
+    })
+
+    snapshot_engine.capture_snapshot({
+        "namespace": "orders",
+        "kind": "ReplicaSet",
+        "name": "orders-api-99ab",
+        "uid": rs_uid,
+        "owner_references": [{"kind": "Deployment", "name": "orders-api", "uid": dep_uid}]
+    })
+
+    snapshot_engine.capture_snapshot({
+        "namespace": "orders",
+        "kind": "Pod",
+        "name": "orders-api-99ab-x7",
+        "uid": pod_uid,
+        "owner_references": [{"kind": "ReplicaSet", "name": "orders-api-99ab", "uid": rs_uid}]
+    })
+
+    # Resolve from Pod UID
+    res = neighborhood_resolver.resolve_root_workload("orders", "Pod", "orders-api-99ab-x7", resource_uid=pod_uid)
+    assert res["root_kind"] == "Deployment"
+    assert res["root_name"] == "orders-api"
+    assert res["root_uid"] == dep_uid
+
+
+def test_worst_state_inheritance_and_neighborhood_endpoint():
+    """Verifies that child pod failures bubble up to parent ReplicaSet and Deployment."""
+    client = TestClient(app)
+
+    res = client.get("/api/v1/topology/neighborhood?namespace=watchdog-demo&resource_kind=Deployment&resource_name=payment-processor")
+    assert res.status_code == 200
+    data = res.json()
+
+    assert "root_id" in data
+    assert "nodes" in data
+    assert "edges" in data
+    assert "worst_state" in data
+
+    # Verify nodes have worst_state and events attached
+    root_node = next((n for n in data["nodes"] if n["is_root"]), None)
+    assert root_node is not None
+    assert root_node["kind"] == "Deployment"
+    assert root_node["worst_state"] in ["Critical", "Warning", "Healthy"]
+
+    # Verify at least one Pod node is attached
+    pod_nodes = [n for n in data["nodes"] if n["kind"] == "Pod"]
+    assert len(pod_nodes) >= 1
+
+    # Verify snapshots endpoint
+    snap_res = client.get("/api/v1/topology/snapshots")
+    assert snap_res.status_code == 200
+    assert "snapshots" in snap_res.json()
+
+
+
 

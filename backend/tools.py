@@ -221,6 +221,21 @@ class ClusterInvestigator:
             for k, v in counts.items():
                 total_scrubbed_count[k] = total_scrubbed_count.get(k, 0) + v
 
+        # Build Kubernetes Neighborhood topology & trigger micro-snapshot to prevent ephemeral pod race conditions
+        from topology import neighborhood_resolver, snapshot_engine
+        try:
+            snapshot_engine.capture_snapshot({
+                "cluster": event_data.get("cluster", "minikube"),
+                "namespace": namespace,
+                "kind": resource_kind,
+                "name": resource_name,
+                "uid": event_data.get("resource_uid")
+            })
+            neighborhood = neighborhood_resolver.build_neighborhood(namespace, resource_kind, resource_name)
+        except Exception as e:
+            logger.warning(f"Neighborhood resolution notice during investigation: {e}")
+            neighborhood = {}
+
         return {
             "resource_info": {
                 "namespace": namespace,
@@ -230,6 +245,7 @@ class ClusterInvestigator:
             },
             "sanitized_logs": sanitized_logs,
             "events": events_list,
+            "neighborhood": neighborhood,
             "manifest_summary": manifest_summary,
             "node_status": node_status,
             "security_scrub_metrics": total_scrubbed_count,

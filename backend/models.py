@@ -2,12 +2,65 @@ from typing import Dict, Any, List, Optional, Literal
 from pydantic import BaseModel, Field
 from datetime import datetime, timezone
 
+EventCategory = Literal["Deploy/Scale", "Image", "Crash/Error", "Health"]
+
+class FoldedEvent(BaseModel):
+    event_uid: str
+    logical_key: Optional[str] = None
+    reason: str
+    category: EventCategory
+    severity: Literal["Critical", "Warning", "Info"]
+    message: str
+    count: int = 1
+    delta_count: int = 1
+    accumulated_count: int = 1
+    multiplier_str: str = ""
+    container_name: Optional[str] = None
+    involved_kind: Optional[str] = "Pod"
+    involved_name: Optional[str] = ""
+    involved_uid: Optional[str] = ""
+    first_timestamp: Optional[str] = None
+    last_timestamp: Optional[str] = None
+
+class TopologyNode(BaseModel):
+    id: str
+    uid: str
+    name: str
+    kind: str
+    namespace: str
+    status: str = "Active"
+    worst_state: Literal["Critical", "Warning", "Healthy"] = "Healthy"
+    has_unhealthy_children: bool = False
+    is_root: bool = False
+    events: List[FoldedEvent] = Field(default_factory=list)
+    containers: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+class TopologyEdge(BaseModel):
+    id: str
+    source: str
+    target: str
+    relation: str = "connects_to"
+
+class NeighborhoodResponse(BaseModel):
+    root_id: str
+    cluster: str = "minikube"
+    namespace: str
+    timestamp: str
+    is_historical: bool = False
+    worst_state: Literal["Critical", "Warning", "Healthy"] = "Healthy"
+    nodes: List[TopologyNode]
+    edges: List[TopologyEdge]
+
 class AlertEvent(BaseModel):
     event_id: str = Field(..., description="Unique event identifier")
     cluster: str = Field(default="production-k8s-cluster", description="Cluster name or identifier")
     namespace: str = Field(..., description="Target Kubernetes namespace")
     resource_kind: str = Field(..., description="Resource kind (Pod, Deployment, Node, etc.)")
     resource_name: str = Field(..., description="Resource name")
+    resource_uid: Optional[str] = Field(default=None, description="Native Kubernetes metadata.uid of the target resource")
+    root_workload_uid: Optional[str] = Field(default=None, description="Root parent workload UID (e.g. Deployment UID)")
+    container_name: Optional[str] = Field(default=None, description="Failing container name for multi-container pods")
     severity: Literal["Critical", "Warning", "Info"] = Field(default="Critical", description="Alert severity level")
     reason: str = Field(..., description="Reason code (e.g., OOMKilled, CrashLoopBackOff, ImagePullBackOff)")
     reasons: Optional[List[str]] = Field(default_factory=list, description="All accumulated failure reasons for this incident")

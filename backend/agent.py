@@ -238,15 +238,23 @@ async def analyze_node(state: AgentState) -> Dict[str, Any]:
                 "- Always provide precise YAML diffs or exact kubectl commands."
             )
             
+            neighborhood_summary = ""
+            topo = investigation.get("neighborhood", {})
+            if topo and topo.get("nodes"):
+                nodes_summary = [f"  * {n.get('kind')}: {n.get('name')} (Status: {n.get('status')}, Health: {n.get('worst_state')})" for n in topo.get("nodes", [])[:7]]
+                neighborhood_summary = "\n".join(nodes_summary)
+
             user_prompt = (
                 f"Cluster Alert Context:\n"
                 f"- Namespace: {event.get('namespace')}\n"
                 f"- Resource: {event.get('resource_kind')}/{event.get('resource_name')}\n"
+                f"- Resource UID: {event.get('resource_uid', 'N/A')}\n"
                 f"- Severity: {event.get('severity')}\n"
                 f"- Alert Reason: {event.get('reason')}\n"
                 f"- Alert Message: {event.get('message')}\n\n"
+                f"Kubernetes Neighborhood (Topology & Worst-State):\n{neighborhood_summary or 'Topology mapped to single workload.'}\n\n"
                 f"Sanitized Pod Logs:\n{json.dumps(investigation.get('sanitized_logs', [])[:10], indent=2)}\n\n"
-                f"Kubernetes Events:\n{json.dumps(investigation.get('events', []), indent=2)}\n\n"
+                f"Kubernetes Events (Categorized & Folded):\n{json.dumps(investigation.get('events', []), indent=2)}\n\n"
                 f"Manifest State:\n{json.dumps(investigation.get('manifest_summary', {}), indent=2)}\n"
             )
 

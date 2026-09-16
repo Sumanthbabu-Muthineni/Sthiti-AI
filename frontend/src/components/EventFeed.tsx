@@ -9,7 +9,8 @@ import {
   Server,
   Zap,
   Flame,
-  Layers
+  Layers,
+  Boxes
 } from 'lucide-react';
 import type { EventRecord, SeverityLevel } from '../types';
 
@@ -17,6 +18,7 @@ interface EventFeedProps {
   events: EventRecord[];
   selectedThreadId: string | null;
   onSelectEvent: (threadId: string) => void;
+  onOpenInfraMap?: (target: { namespace: string; kind: string; name: string }) => void;
   onTriggerSimulate: () => void;
 }
 
@@ -24,6 +26,7 @@ export const EventFeed: React.FC<EventFeedProps> = ({
   events,
   selectedThreadId,
   onSelectEvent,
+  onOpenInfraMap,
   onTriggerSimulate,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
@@ -265,11 +268,31 @@ export const EventFeed: React.FC<EventFeedProps> = ({
                     ))}
                   </div>
 
-                  {/* Footer Context: Namespace & Timestamp */}
+                  {/* Footer Context: Namespace, Timestamp, and 1-Click Infra Map */}
                   <div className="flex items-center justify-between text-[10px] text-slate-400 font-sans pt-1 border-t border-slate-800/60">
-                    <span className="bg-slate-900 px-1.5 py-0.5 rounded font-mono text-slate-300">
-                      ns: {ev.namespace}
-                    </span>
+                    <div className="flex items-center space-x-1.5">
+                      <span className="bg-slate-900 px-1.5 py-0.5 rounded font-mono text-slate-300">
+                        ns: {ev.namespace}
+                      </span>
+
+                      {onOpenInfraMap && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onOpenInfraMap({
+                              namespace: ev.namespace || 'watchdog-demo',
+                              kind: ev.resource_kind || 'Deployment',
+                              name: deploymentName
+                            });
+                          }}
+                          className="flex items-center gap-1 text-[10px] font-mono text-cyan-400 hover:text-cyan-200 bg-cyan-950/70 hover:bg-cyan-900/80 border border-cyan-800/70 px-1.5 py-0.5 rounded transition-all cursor-pointer shadow-sm hover:shadow-cyan-500/20"
+                          title="1-Click Jump to Kubernetes Neighborhood (Infra Map)"
+                        >
+                          <Boxes className="w-3 h-3 text-cyan-400" />
+                          <span>Infra Map</span>
+                        </button>
+                      )}
+                    </div>
 
                     <div className="flex items-center space-x-1 font-mono text-slate-400">
                       <span>Ingested:</span>
